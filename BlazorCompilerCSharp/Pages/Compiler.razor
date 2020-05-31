@@ -1,0 +1,214 @@
+﻿@page "/compiler"
+
+@inject NavigationManager navigationManager
+
+<h1>Interactice C# Compiler</h1>
+<div id="outer-screen">
+    <div id="inner-screen">
+        <div id="output-outer"><div id="output">@((MarkupString)Output)</div></div>
+        <div id="blank-line">&nbsp;</div>
+        <div id="input-row">
+            <span>&gt;&nbsp;</span><input id="input" @bind="Input" type="text" @onkeydown="OnKeyDown" @ disabled="@Disabled" autofocus />
+        </div>
+    </div>
+</div>
+<div id="outer-text-box">
+    This site was written using Blazor - an open source and cross-platform web UI framework for building single-page apps using .NET and C# instead of JavaScript. <a href="https://devblogs.microsoft.com/aspnet/blazor-webassembly-3-2-0-now-available/">More on Blazor.</a>
+    <br />
+    Above window, that looks like a terminal is in fact an interactive C# compiler. Code that You put there is executed in WebAssembly, which is a binary instruction format for a stack-based virtual machine.
+    <br />
+    Try it out!
+    <br />
+    For example type:
+    <br /><br />
+    int a = 5; *enter* *enter*
+    <br />
+    Console.WriteLine(a); *enter* *enter*
+    <br />
+    or:
+    <br />
+    2 + 2 *enter* *enter*
+</div>
+
+
+@code {
+    public bool Disabled { get; set; } = true;
+    public string Output { get; set; } = "";
+    public string Input { get; set; } = "";
+    private CSharpCompilation _previousCompilation;
+    private IEnumerable<MetadataReference> _references;
+    private object[] _submissionStates = new object[] { null, null };
+    private int _submissionIndex = 0;
+    private List<string> _history = new List<string>();
+    private int _historyIndex = 0;
+
+    protected async override Task OnInitializedAsync()
+    {
+        var refs = AppDomain.CurrentDomain.GetAssemblies();
+        var client = new HttpClient
+        {
+            BaseAddress = new Uri(navigationManager.BaseUri)
+        };
+
+        var references = new List<MetadataReference>();
+
+        foreach (var reference in refs.Where(x => !x.IsDynamic && !string.IsNullOrWhiteSpace(x.Location)))
+        {
+            var stream = await client.GetStreamAsync($"_framework/_bin/{reference.Location}");
+            references.Add(MetadataReference.CreateFromStream(stream));
+        }
+        Disabled = false;
+        _references = references;
+    }
+
+    public async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "ArrowUp" && _historyIndex > 0)
+        {
+            _historyIndex--;
+            Input = _history[_historyIndex];
+        }
+        else if (e.Key == "ArrowDown" && _historyIndex + 1 < _history.Count)
+        {
+            _historyIndex++;
+            Input = _history[_historyIndex];
+        }
+        // todo:  doesn't work right when typing new command.  Requires Enter to be pressed first sometimes
+        // has to do with DOM focus I think
+        // currently handling this with javascript as well
+        else if (e.Key == "Escape")
+        {
+            Input = "";
+            _historyIndex = _history.Count;
+        }
+        else if (e.Key == "Enter")
+        {
+            var code = Input;
+            if (!string.IsNullOrEmpty(code))
+            {
+                _history.Add(code);
+            }
+            _historyIndex = _history.Count;
+            Input = "";
+
+            await RunSubmission(code);
+        }
+    }
+
+    public async Task Run(KeyboardEventArgs e)
+    {
+        if (e.Key != "Enter")
+        {
+            return;
+        }
+
+        var code = Input;
+        if (!string.IsNullOrEmpty(code))
+        {
+            _history.Add(code);
+        }
+        _historyIndex = _history.Count;
+        Input = "";
+
+        await RunSubmission(code);
+    }
+
+    private async Task RunSubmission(string code)
+    {
+        Output += $@"<br /><span class=""info"">{HttpUtility.HtmlEncode(code)}</span>";
+
+        var previousOut = Console.Out;
+        try
+        {
+            if (TryCompile(code, out var script, out var errorDiagnostics))
+            {
+                var writer = new StringWriter();
+                Console.SetOut(writer);
+
+                var entryPoint = _previousCompilation.GetEntryPoint(CancellationToken.None);
+                var type = script.GetType($"{entryPoint.ContainingNamespace.MetadataName}.{entryPoint.ContainingType.MetadataName}");
+                var entryPointMethod = type.GetMethod(entryPoint.MetadataName);
+
+                var submission = (Func<object[], Task>)entryPointMethod.CreateDelegate(typeof(Func<object[], Task>));
+
+                if (_submissionIndex >= _submissionStates.Length)
+                {
+                    Array.Resize(ref _submissionStates, Math.Max(_submissionIndex, _submissionStates.Length * 2));
+                }
+
+                var returnValue = await ((Task<object>)submission(_submissionStates));
+                if (returnValue != null)
+                {
+                    Console.WriteLine(CSharpObjectFormatter.Instance.FormatObject(returnValue));
+                }
+
+                var output = HttpUtility.HtmlEncode(writer.ToString());
+                if (!string.IsNullOrWhiteSpace(output))
+                {
+                    Output += $"<br />{output}";
+                }
+            }
+            else
+            {
+                foreach (var diag in errorDiagnostics)
+                {
+                    Output += $@"<br / ><span class=""error"">{HttpUtility.HtmlEncode(diag)}</span>";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Output += $@"<br /><span class=""error"">{HttpUtility.HtmlEncode(CSharpObjectFormatter.Instance.FormatException(ex))}</span>";
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+        }
+    }
+
+    private bool TryCompile(string source, out Assembly assembly, out IEnumerable<Diagnostic> errorDiagnostics)
+    {
+        assembly = null;
+        var scriptCompilation = CSharpCompilation.CreateScriptCompilation(
+            Path.GetRandomFileName(),
+            CSharpSyntaxTree.ParseText(source, CSharpParseOptions.Default.WithKind(SourceCodeKind.Script).WithLanguageVersion(LanguageVersion.Preview)),
+            _references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, usings: new[]
+            {
+                    "System",
+                    "System.IO",
+                    "System.Collections.Generic",
+                    "System.Console",
+                    "System.Diagnostics",
+                    "System.Dynamic",
+                    "System.Linq",
+                    "System.Linq.Expressions",
+                    "System.Net.Http",
+                    "System.Text",
+                    "System.Threading.Tasks"
+                    }),
+            _previousCompilation
+        );
+
+        errorDiagnostics = scriptCompilation.GetDiagnostics().Where(x => x.Severity == DiagnosticSeverity.Error);
+        if (errorDiagnostics.Any())
+        {
+            return false;
+        }
+
+        using (var peStream = new MemoryStream())
+        {
+            var emitResult = scriptCompilation.Emit(peStream);
+
+            if (emitResult.Success)
+            {
+                _submissionIndex++;
+                _previousCompilation = scriptCompilation;
+                assembly = Assembly.Load(peStream.ToArray());
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
