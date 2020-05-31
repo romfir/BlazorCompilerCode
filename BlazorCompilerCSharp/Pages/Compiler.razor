@@ -8,7 +8,7 @@
         <div id="output-outer"><div id="output">@((MarkupString)Output)</div></div>
         <div id="blank-line">&nbsp;</div>
         <div id="input-row">
-            <span>&gt;&nbsp;</span><input id="input" @bind="Input" type="text" @onkeydown="OnKeyDown" @ disabled="@Disabled" autofocus />
+            <span>&gt;&nbsp;</span><input id="input" @bind="Input" type="text" @onkeydown="OnKeyDown" disabled="@Disabled" autofocus />
         </div>
     </div>
 </div>
@@ -18,6 +18,7 @@
     Above window, that looks like a terminal is in fact an interactive C# compiler. Code that You put there is executed in WebAssembly, which is a binary instruction format for a stack-based virtual machine.
     <br />
     Try it out!
+    <br />
     <br />
     For example type:
     <br /><br />
